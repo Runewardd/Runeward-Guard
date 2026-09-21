@@ -1,0 +1,4 @@
+{"id":"capture-1","time":"2026-09-21T12:00:00Z","kind":"screen_capture","application":"Screenshot","path":"/tmp/guard-demo-screen.png"}
+{"id":"upload-1","time":"2026-09-21T12:01:00Z","kind":"file_upload","harness":"claude","destination":"https://claude.ai/new","path":"/tmp/guard-demo-screen.png"}
+{"id":"prompt-1","time":"2026-09-21T12:02:00Z","kind":"prompt_submit","harness":"codex","text":"password=example-only-not-a-real-secret"}
+{"id":"keychain-1","time":"2026-09-21T12:03:00Z","kind":"keychain_access","harness":"copilot"}
