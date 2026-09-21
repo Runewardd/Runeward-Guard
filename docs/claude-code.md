@@ -7,13 +7,13 @@ Guard also supports a [Claude Code `PreToolUse` hook](https://code.claude.com/do
 Build a binary:
 
 ```sh
-CGO_ENABLED=0 go build -o ./bin/guard ./cmd/guard
+cargo build --release --locked
 ```
 
 Test the adapter without installing a hook:
 
 ```sh
-./bin/guard claude-hook < examples/claude-hook.json
+./target/release/guard claude-hook < examples/claude-hook.json
 ```
 
 To opt in for one project, add this entry to that project's `.claude/settings.json`, replacing the example path with the **absolute path** to your built `guard` binary. Merge the `UserPromptSubmit` entry with any existing hooks instead of replacing them:

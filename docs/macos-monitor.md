@@ -4,17 +4,16 @@ This path gives Guard two real, opt-in observations: a newly seen image file wit
 
 ## Build and run
 
-Build both Go binaries from this repository:
+Build both Rust binaries from this repository:
 
 ```sh
-CGO_ENABLED=0 go build -o ./bin/guard ./cmd/guard
-CGO_ENABLED=0 go build -o ./bin/guard-browser-host ./cmd/guard-browser-host
+cargo build --release --locked
 ```
 
 Start the monitor with the **absolute path** to your screenshot folder. It baselines existing images at startup, then checks new or changed image files every two seconds. The folder is non-recursive; macOS file-access permissions may be needed for Desktop or another protected folder.
 
 ```sh
-./bin/guard monitor --dir /absolute/path/to/screenshots
+./target/release/guard monitor --dir /absolute/path/to/screenshots
 ```
 
 Guard reads only image files up to 32 MiB in that folder and checks for the `com.apple.metadata:kMDItemIsScreenCapture` attribute. It hashes matching files locally and emits no image path or bytes in findings. A screenshot saved only to the clipboard will not be detected by the folder monitor.
@@ -22,7 +21,7 @@ Guard reads only image files up to 32 MiB in that folder and checks for the `com
 ## Connect Google Chrome
 
 1. In `chrome://extensions`, enable Developer mode and load `extension/chrome` as an unpacked extension. Copy the extension's 32-letter ID.
-2. In another terminal, run `./bin/guard setup-chrome --extension-id YOUR_EXTENSION_ID --host-binary /absolute/path/to/bin/guard-browser-host`. The command creates a private Guard host config and a user-level Chrome native-messaging manifest; it refuses to overwrite an existing one. These are the only installation files it writes.
+2. In another terminal, run `./target/release/guard setup-chrome --extension-id YOUR_EXTENSION_ID --host-binary /absolute/path/to/target/release/guard-browser-host`. The command creates a private Guard host config and a user-level Chrome native-messaging manifest; it refuses to overwrite an existing one. These are the only installation files it writes.
 3. Keep `guard monitor` running. Its default socket is `~/.runeward-guard/monitor.sock`, and `setup-chrome` points the native host to the same socket.
 4. For a safe test, take a **non-sensitive** macOS screenshot into the watched folder, then select that file on ChatGPT or Claude without submitting a prompt. The monitor should emit `screenshot_selected_for_ai` with decision `warn`.
 

@@ -6,11 +6,12 @@ Runeward Guard is a separate endpoint-side project intended to complement [Runew
 
 ## Try the first slice
 
-Requires Go 1.22 or newer; use a currently supported Go release for production builds (CI uses Go 1.27.1). No third-party Go modules are required.
+The native Guard CLI, detector, screenshot monitor, and browser bridge are written in Rust. The Chrome extension is JavaScript because it runs inside Chrome. Build with Rust 1.85 or newer; dependencies are locked in `Cargo.lock`.
 
 ```sh
-CGO_ENABLED=0 go test ./...
-CGO_ENABLED=0 go run ./cmd/guard inspect < examples/events.ndjson
+cargo test --locked
+cargo build --locked
+./target/debug/guard inspect < examples/events.ndjson
 ```
 
 `inspect` consumes newline-delimited JSON events and returns one decision per event. The example demonstrates a captured screenshot followed by a matching upload to an AI destination, a password-like prompt, and a Keychain-access signal. These are **synthetic events**, not observations made by Guard on your computer.
@@ -18,10 +19,10 @@ CGO_ENABLED=0 go run ./cmd/guard inspect < examples/events.ndjson
 For a synchronous, single-event hook, use `check`:
 
 ```sh
-printf '%s\n' '{"id":"example","time":"2026-09-21T12:00:00Z","kind":"prompt_submit","harness":"codex","text":"password=example-only-credential"}' | go run ./cmd/guard check
+printf '%s\n' '{"id":"example","time":"2026-09-21T12:00:00Z","kind":"prompt_submit","harness":"codex","text":"password=example-only-credential"}' | ./target/debug/guard check
 ```
 
-`check` exits 0 for `allow` or `warn`, 2 for `block`, and 1 when inspection fails. A hook adapter must interpret these exit codes and enforce the block. `go run` itself may wrap the child's exit status, so build a binary before using it in a hook.
+`check` exits 0 for `allow` or `warn`, 2 for `block`, and 1 when inspection fails. A hook adapter must interpret these exit codes and enforce the block.
 
 For the first actual harness integration, see [the opt-in Claude Code hook](docs/claude-code.md). It blocks a detected password-like string, token, or private-key header before Claude processes a submitted text prompt. It does not cover every way Claude can receive sensitive information.
 
