@@ -6,7 +6,7 @@ Runeward Guard is a separate endpoint-side project intended to complement [Runew
 
 ## Try the first slice
 
-Requires Go 1.22 or newer. No third-party Go modules are required.
+Requires Go 1.22 or newer; use a currently supported Go release for production builds (CI uses Go 1.27.1). No third-party Go modules are required.
 
 ```sh
 CGO_ENABLED=0 go test ./...
