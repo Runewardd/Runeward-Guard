@@ -207,7 +207,7 @@ fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), Strin
     let directory = directory.ok_or("monitor requires --dir")?;
     let socket = match socket {
         Some(socket) => socket,
-        None => wire::socket_path()?.into(),
+        None => wire::socket_path()?,
     };
     eprintln!(
         "Guard monitoring {}; browser socket {}",
