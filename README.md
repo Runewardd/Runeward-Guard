@@ -6,7 +6,7 @@ Runeward Guard is a separate endpoint-side project intended to complement [Runew
 
 ## Try the first slice
 
-The native Guard CLI, detector, screenshot monitor, and browser bridge are written in Rust. The Chrome extension is JavaScript because it runs inside Chrome. Build with Rust 1.85 or newer; dependencies are locked in `Cargo.lock`.
+The native Guard CLI, detector, screenshot monitor, and browser bridge are written in Rust. The Chrome extension is JavaScript because it runs inside Chrome. Build with Rust 1.95 or newer; dependencies are locked in `Cargo.lock`.
 
 ```sh
 cargo test --locked
