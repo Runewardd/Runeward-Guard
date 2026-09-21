@@ -21,6 +21,7 @@ type Event struct {
 	Application string    `json:"application,omitempty"`
 	Destination string    `json:"destination,omitempty"`
 	Path        string    `json:"path,omitempty"`
+	Digest      string    `json:"digest,omitempty"`
 	Text        string    `json:"text,omitempty"`
 }
 
@@ -41,12 +42,13 @@ type capture struct {
 }
 
 type Detector struct {
-	captures map[string]capture
-	lastTime time.Time
+	captures    map[string]capture
+	attachments map[string]time.Time
+	lastTime    time.Time
 }
 
 func New() *Detector {
-	return &Detector{captures: make(map[string]capture)}
+	return &Detector{captures: make(map[string]capture), attachments: make(map[string]time.Time)}
 }
 
 var (
@@ -54,6 +56,7 @@ var (
 	providerToken      = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b`)
 	passwordAssignment = regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*['"]?([^\s'";,]{8,})`)
 	eventID            = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	sha256Digest       = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
 // Inspect processes one event without retaining prompt content. Events should come
@@ -101,10 +104,20 @@ func (d *Detector) Inspect(event Event) (Result, error) {
 		result.Decision = "warn"
 		result.Findings = append(result.Findings, Finding{"agent_keychain_access", "high", "An AI harness accessed Keychain; this does not establish disclosure."})
 	case "screen_capture":
-		if !filepath.IsAbs(event.Path) || event.Text != "" {
-			return Result{}, fmt.Errorf("screen_capture requires an absolute path and no text")
+		if (event.Path == "" && event.Digest == "") || (event.Path != "" && !filepath.IsAbs(event.Path)) || event.Text != "" || (event.Digest != "" && !sha256Digest.MatchString(event.Digest)) {
+			return Result{}, fmt.Errorf("screen_capture requires an absolute path or SHA-256 digest, and no text")
 		}
-		d.captures[pathKey(event.Path)] = capture{at: event.Time}
+		if event.Path != "" {
+			d.captures[pathKey(event.Path)] = capture{at: event.Time}
+		}
+		if event.Digest != "" {
+			d.captures["sha256:"+event.Digest] = capture{at: event.Time}
+			if attachedAt, ok := d.attachments[event.Digest]; ok && !event.Time.Before(attachedAt) && event.Time.Sub(attachedAt) <= captureWindow {
+				result.Decision = "warn"
+				result.Findings = append(result.Findings, Finding{"screenshot_selected_for_ai", "high", "A recently observed screenshot was selected for an AI page; upload is not confirmed."})
+				delete(d.attachments, event.Digest)
+			}
+		}
 	case "file_upload":
 		if !filepath.IsAbs(event.Path) || event.Destination == "" || event.Text != "" {
 			return Result{}, fmt.Errorf("file_upload requires an absolute path, destination, and no text")
@@ -115,6 +128,19 @@ func (d *Detector) Inspect(event Event) (Result, error) {
 		if previous, ok := d.captures[pathKey(event.Path)]; ok && !event.Time.Before(previous.at) && event.Time.Sub(previous.at) <= captureWindow {
 			result.Decision = "warn"
 			result.Findings = append(result.Findings, Finding{"screenshot_uploaded_to_ai", "high", "A recently captured screenshot was uploaded to an AI destination."})
+		}
+	case "file_attach":
+		if !sha256Digest.MatchString(event.Digest) || event.Destination == "" || event.Text != "" {
+			return Result{}, fmt.Errorf("file_attach requires a SHA-256 digest, destination, and no text")
+		}
+		if !isAIDestination(event.Destination) {
+			break
+		}
+		if previous, ok := d.captures["sha256:"+event.Digest]; ok && !event.Time.Before(previous.at) && event.Time.Sub(previous.at) <= captureWindow {
+			result.Decision = "warn"
+			result.Findings = append(result.Findings, Finding{"screenshot_selected_for_ai", "high", "A recently captured screenshot was selected for an AI page; upload is not confirmed."})
+		} else {
+			d.attachments[event.Digest] = event.Time
 		}
 	default:
 		return Result{}, fmt.Errorf("unsupported event kind %q", event.Kind)
@@ -127,6 +153,11 @@ func (d *Detector) expire(now time.Time) {
 	for key, value := range d.captures {
 		if now.Sub(value.at) > captureWindow {
 			delete(d.captures, key)
+		}
+	}
+	for digest, attachedAt := range d.attachments {
+		if now.Sub(attachedAt) > captureWindow {
+			delete(d.attachments, digest)
 		}
 	}
 }

@@ -16,8 +16,12 @@ import (
 const maxEventBytes = 1 << 20
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: guard <inspect|check|claude-hook> < input.json")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: guard <inspect|check|claude-hook|claude-tool-hook|monitor|setup-chrome>")
+		os.Exit(1)
+	}
+	if os.Args[1] != "monitor" && os.Args[1] != "setup-chrome" && len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "guard: unexpected arguments")
 		os.Exit(1)
 	}
 	var err error
@@ -32,6 +36,12 @@ func main() {
 		}
 	case "claude-hook":
 		err = claudeHook(os.Stdin, os.Stdout)
+	case "claude-tool-hook":
+		err = claudeToolHook(os.Stdin, os.Stdout)
+	case "monitor":
+		err = monitorCommand(os.Args[2:], os.Stdout, os.Stderr)
+	case "setup-chrome":
+		err = setupChromeCommand(os.Args[2:], os.Stdout)
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}

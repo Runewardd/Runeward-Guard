@@ -98,3 +98,32 @@ func TestOutOfOrderEventsFail(t *testing.T) {
 		t.Fatal("expected ordering error")
 	}
 }
+
+func TestBrowserFileSelectionMatchesScreenshotDigest(t *testing.T) {
+	d := New()
+	digest := strings.Repeat("a", 64)
+	_, err := d.Inspect(Event{ID: "capture", Time: baseTime, Kind: "screen_capture", Path: "/tmp/screenshot.png", Digest: digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := d.Inspect(Event{ID: "selection", Time: baseTime.Add(time.Minute), Kind: "file_attach", Digest: digest, Destination: "https://chatgpt.com/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision != "warn" || result.Findings[0].Rule != "screenshot_selected_for_ai" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestLateScreenshotMetadataStillCorrelatesSelection(t *testing.T) {
+	d := New()
+	digest := strings.Repeat("b", 64)
+	first, err := d.Inspect(Event{ID: "selection", Time: baseTime, Kind: "file_attach", Digest: digest, Destination: "https://claude.ai/"})
+	if err != nil || first.Decision != "allow" {
+		t.Fatalf("unexpected first result: %#v err=%v", first, err)
+	}
+	second, err := d.Inspect(Event{ID: "capture", Time: baseTime.Add(time.Second), Kind: "screen_capture", Digest: digest})
+	if err != nil || second.Decision != "warn" || second.Findings[0].Rule != "screenshot_selected_for_ai" {
+		t.Fatalf("unexpected correlated result: %#v err=%v", second, err)
+	}
+}
