@@ -208,14 +208,13 @@ impl Detector {
                 if !event.digest.is_empty() {
                     self.captures
                         .insert(format!("sha256:{}", event.digest), event.time);
-                    if let Some(attached) = self.attachments.get(&event.digest) {
-                        if event.time >= *attached
-                            && event.time.signed_duration_since(*attached) <= Duration::minutes(15)
-                        {
-                            result.decision = "warn".into();
-                            result.findings.push(finding("screenshot_selected_for_ai", "high", "A recently observed screenshot was selected for an AI page; upload is not confirmed."));
-                            self.attachments.remove(&event.digest);
-                        }
+                    if let Some(attached) = self.attachments.get(&event.digest)
+                        && event.time >= *attached
+                        && event.time.signed_duration_since(*attached) <= Duration::minutes(15)
+                    {
+                        result.decision = "warn".into();
+                        result.findings.push(finding("screenshot_selected_for_ai", "high", "A recently observed screenshot was selected for an AI page; upload is not confirmed."));
+                        self.attachments.remove(&event.digest);
                     }
                 }
             }

@@ -79,16 +79,15 @@ impl<C: Fn(&Path) -> bool> ScreenshotScanner<C> {
             if !state.emitted
                 && now.duration_since(state.first_seen).unwrap_or_default() <= METADATA_GRACE
                 && (self.classify)(&path)
+                && let Ok(digest) = hash_stable_file(&path, &metadata)
             {
-                if let Ok(digest) = hash_stable_file(&path, &metadata) {
-                    self.sequence += 1;
-                    let mut event =
-                        Event::new(format!("macos-capture-{}", self.sequence), "screen_capture");
-                    event.digest = digest;
-                    event.application = "macos".into();
-                    events.push(event);
-                    state.emitted = true;
-                }
+                self.sequence += 1;
+                let mut event =
+                    Event::new(format!("macos-capture-{}", self.sequence), "screen_capture");
+                event.digest = digest;
+                event.application = "macos".into();
+                events.push(event);
+                state.emitted = true;
             }
         }
         self.seen.retain(|path, _| observed.contains(path));
