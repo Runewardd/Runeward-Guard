@@ -19,6 +19,12 @@ struct ClaudeInput {
 }
 
 #[derive(Deserialize)]
+struct CodexPromptInput {
+    hook_event_name: String,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
 struct ToolInput {
     hook_event_name: String,
     tool_name: String,
@@ -122,9 +128,47 @@ fn claude_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), S
     }
 }
 
+fn codex_block<W: Write>(output: &mut W, reason: &str) -> Result<(), String> {
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({"decision":"block","reason":reason}),
+    )
+    .map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn codex_prompt_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return codex_block(output, "Runeward Guard could not inspect this prompt."),
+    };
+    let Ok(hook): Result<CodexPromptInput, _> = parse_exact(&data) else {
+        return codex_block(output, "Runeward Guard could not inspect this prompt.");
+    };
+    if hook.hook_event_name != "UserPromptSubmit" || hook.prompt.is_empty() {
+        return codex_block(output, "Runeward Guard could not inspect this prompt.");
+    }
+    let mut event = Event::new("codex-prompt".into(), "prompt_submit");
+    event.harness = "codex".into();
+    event.text = hook.prompt;
+    match Detector::default().inspect(&event) {
+        Ok(result) if result.decision == "block" => codex_block(
+            output,
+            "Runeward Guard detected a possible secret in this prompt.",
+        ),
+        Ok(_) => Ok(()),
+        Err(_) => codex_block(output, "Runeward Guard could not inspect this prompt."),
+    }
+}
+
 fn tool_deny<W: Write>(output: &mut W, reason: &str) -> Result<(), String> {
     serde_json::to_writer(&mut *output, &serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}})).map_err(|error| error.to_string())?;
     writeln!(output).map_err(|error| error.to_string())
+}
+
+fn keychain_command(command: &str) -> bool {
+    let keychain_cli = Regex::new(r"(?i)(?:^|[^a-z0-9_])(?:/usr/bin/)?security\s+(?:find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain)\b").expect("constant regex");
+    keychain_cli.is_match(command) || command.to_ascii_lowercase().contains("library/keychains/")
 }
 
 fn claude_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
@@ -148,11 +192,35 @@ fn claude_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<
     else {
         return tool_deny(output, "Runeward Guard could not inspect this tool call.");
     };
-    let keychain_cli = Regex::new(r"(?i)(?:^|[^a-z0-9_])(?:/usr/bin/)?security\s+(?:find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain)\b").expect("constant regex");
-    if keychain_cli.is_match(&command)
-        || command.to_ascii_lowercase().contains("library/keychains/")
-    {
+    if keychain_command(&command) {
         return tool_deny(
+            output,
+            "Runeward Guard blocked a Keychain-related tool command.",
+        );
+    }
+    Ok(())
+}
+
+fn codex_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return codex_block(output, "Runeward Guard could not inspect this tool call."),
+    };
+    let Ok(hook): Result<ToolInput, _> = parse_exact(&data) else {
+        return codex_block(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if hook.hook_event_name != "PreToolUse" || hook.tool_name != "Bash" {
+        return codex_block(output, "Runeward Guard could not inspect this tool call.");
+    }
+    let Some(command) = hook
+        .tool_input
+        .and_then(|tool| tool.command)
+        .filter(|command| !command.is_empty())
+    else {
+        return codex_block(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if keychain_command(&command) {
+        return codex_block(
             output,
             "Runeward Guard blocked a Keychain-related tool command.",
         );
@@ -319,7 +387,7 @@ fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
         return Err(
-            "usage: guard <inspect|check|claude-hook|claude-tool-hook|monitor|setup-chrome>".into(),
+            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|monitor|setup-chrome>".into(),
         );
     };
     let mut stdout = io::stdout().lock();
@@ -333,6 +401,12 @@ fn run() -> Result<i32, String> {
         }
         "claude-tool-hook" if args.len() == 1 => {
             claude_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "codex-prompt-hook" if args.len() == 1 => {
+            codex_prompt_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "codex-tool-hook" if args.len() == 1 => {
+            codex_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
         }
         "monitor" => monitor_command(&args[1..], &mut stdout).map(|_| 0),
         "setup-chrome" => setup_command(&args[1..], &mut stdout).map(|_| 0),
@@ -371,6 +445,26 @@ mod tests {
             String::from_utf8(output)
                 .unwrap()
                 .contains("\"permissionDecision\":\"deny\"")
+        );
+    }
+
+    #[test]
+    fn codex_prompt_is_blocked_without_echo() {
+        let mut output = Vec::new();
+        codex_prompt_hook(&mut br#"{"hook_event_name":"UserPromptSubmit","session_id":"test","prompt":"password=example-only-credential"}"#.as_slice(), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("\"decision\":\"block\""));
+        assert!(!text.contains("example-only-credential"));
+    }
+
+    #[test]
+    fn codex_keychain_command_is_blocked() {
+        let mut output = Vec::new();
+        codex_tool_hook(&mut br#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"security find-generic-password"}}"#.as_slice(), &mut output).unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("\"decision\":\"block\"")
         );
     }
 }

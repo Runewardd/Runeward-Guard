@@ -2,7 +2,7 @@
 
 Runeward Guard is a separate endpoint-side project intended to complement [Runeward](https://github.com/Runewardd/runeward). Runeward governs agents inside its sandbox; Guard is being built to detect risky activity by AI harnesses on a person's own machine.
 
-**Current status: experimental endpoint monitoring, not a complete EDR.** Guard can watch a selected macOS folder for files bearing Apple's screenshot marker and correlate their local SHA-256 digests with image-selection events from an opt-in Chrome extension on ChatGPT and Claude. It also provides a Claude Code prompt hook. It does not observe all Keychain access, confirm browser upload completion, inspect other browsers or desktop AI apps, or install a system extension. Do not rely on it as complete disclosure prevention.
+**Current status: experimental endpoint monitoring, not a complete EDR.** Guard can watch a selected macOS folder for files bearing Apple's screenshot marker and correlate their local SHA-256 digests with image-selection events from an opt-in Chrome extension on ChatGPT and Claude. It also provides opt-in Claude Code and Codex prompt hooks. It does not observe all Keychain access, confirm browser upload completion, inspect other browsers or desktop AI apps, or install a system extension. Do not rely on it as complete disclosure prevention.
 
 ## Try the first slice
 
@@ -26,7 +26,7 @@ printf '%s\n' '{"id":"example","time":"2026-09-21T12:00:00Z","kind":"prompt_subm
 
 For the first actual harness integration, see [the opt-in Claude Code hook](docs/claude-code.md). It blocks a detected password-like string, token, or private-key header before Claude processes a submitted text prompt. It does not cover every way Claude can receive sensitive information.
 
-For live screenshot-to-browser correlation, see [macOS monitoring setup](docs/macos-monitor.md). The browser extension observes file selection, drag/drop, and paste on supported AI pages; it cannot prove that the site completed an upload.
+For live screenshot-to-browser correlation, see [macOS monitoring setup](docs/macos-monitor.md). The browser extension observes file selection, drag/drop, and paste on supported AI pages; it cannot prove that the site completed an upload. Opt-in prompt and Keychain-command hooks are available for [Claude Code](docs/claude-code.md) and [Codex](docs/codex.md).
 
 For the experimental macOS Endpoint Security sensor and an entitlement-free replay, see [the sensor notes](docs/endpoint-security.md). The live sensor is not usable as an unsigned Cargo binary and does not identify Keychain item retrieval through `securityd`.
 
