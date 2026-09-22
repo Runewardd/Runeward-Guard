@@ -1,10 +1,13 @@
 use chrono::Utc;
 use regex::Regex;
 use runeward_guard::MAX_EVENT_BYTES;
+use runeward_guard::audit;
 use runeward_guard::detector::{Detector, Event};
 use runeward_guard::{host, observer, parse_exact, wire};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::{self, BufRead, Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -251,6 +254,102 @@ fn setup_command(args: &[String], output: &mut impl Write) -> Result<(), String>
     .map_err(|error| error.to_string())
 }
 
+fn doctor(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let directory = match args {
+        [] => None,
+        [flag, path] if flag == "--dir" => Some(Path::new(path)),
+        _ => return Err("usage: guard doctor [--dir ABSOLUTE_SCREENSHOT_DIRECTORY]".into()),
+    };
+    let watch_directory = match directory {
+        None => "not_checked",
+        Some(path) if path.is_absolute() && path.is_dir() && fs::read_dir(path).is_ok() => {
+            "readable"
+        }
+        Some(_) => "unavailable",
+    };
+    let host_config = host::load_config();
+    let browser_host_config = match &host_config {
+        Ok(_) => "valid",
+        Err(_) => match std::env::var_os("HOME") {
+            Some(home) => match fs::symlink_metadata(
+                PathBuf::from(home).join(".runeward-guard/browser-host.json"),
+            ) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => "not_configured",
+                _ => "invalid",
+            },
+            None => "unavailable",
+        },
+    };
+    let socket_path = host_config
+        .as_ref()
+        .map(|config| config.socket.clone())
+        .ok()
+        .or_else(|| wire::socket_path().ok());
+    let monitor_socket = match socket_path {
+        Some(path) => match fs::symlink_metadata(path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.permissions().mode() & 0o077 == 0
+                    && metadata.uid() == unsafe { libc::geteuid() } =>
+            {
+                "present_private"
+            }
+            Ok(_) => "unsafe_or_not_socket",
+            Err(error) if error.kind() == io::ErrorKind::NotFound => "absent",
+            Err(_) => "unavailable",
+        },
+        None => "unavailable",
+    };
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({
+            "macos_supported": cfg!(target_os = "macos"),
+            "watch_directory": watch_directory,
+            "browser_host_config": browser_host_config,
+            "monitor_socket": monitor_socket,
+            "endpoint_security_live": "not_verified"
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn audit_summary(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let mut file = None;
+    let mut since = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--file" => file = rest.next().map(PathBuf::from),
+            "--since" => {
+                let value = rest.next().ok_or("missing --since value")?;
+                since = Some(
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .map_err(|_| "--since requires an RFC 3339 timestamp")?
+                        .with_timezone(&Utc),
+                );
+            }
+            _ => return Err(format!("unexpected audit-summary argument: {arg}")),
+        }
+    }
+    let path = file.ok_or("audit-summary requires --file")?;
+    if !path.is_absolute() {
+        return Err("audit-summary requires an absolute file path".into());
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.len() > audit::MAX_AUDIT_FILE_BYTES
+    {
+        return Err("audit file must be an owner-only regular file of at most 64 MiB".into());
+    }
+    let mut input = io::BufReader::new(fs::File::open(path).map_err(|error| error.to_string())?);
+    let summary = audit::summarize(&mut input, since)?;
+    serde_json::to_writer(&mut *output, &summary).map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
 fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err("monitor currently requires macOS".into());
@@ -387,7 +486,7 @@ fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
         return Err(
-            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|monitor|setup-chrome>".into(),
+            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|doctor|audit-summary|monitor|setup-chrome>".into(),
         );
     };
     let mut stdout = io::stdout().lock();
@@ -408,6 +507,8 @@ fn run() -> Result<i32, String> {
         "codex-tool-hook" if args.len() == 1 => {
             codex_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
         }
+        "doctor" => doctor(&args[1..], &mut stdout).map(|_| 0),
+        "audit-summary" => audit_summary(&args[1..], &mut stdout).map(|_| 0),
         "monitor" => monitor_command(&args[1..], &mut stdout).map(|_| 0),
         "setup-chrome" => setup_command(&args[1..], &mut stdout).map(|_| 0),
         _ => Err("unknown command or unexpected arguments".into()),
@@ -466,5 +567,14 @@ mod tests {
                 .unwrap()
                 .contains("\"decision\":\"block\"")
         );
+    }
+
+    #[test]
+    fn doctor_is_explicit_about_unverified_endpoint_security() {
+        let mut output = Vec::new();
+        doctor(&[], &mut output).unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(status["endpoint_security_live"], "not_verified");
+        assert_eq!(status["watch_directory"], "not_checked");
     }
 }

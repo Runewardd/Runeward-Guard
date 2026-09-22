@@ -28,6 +28,8 @@ For the first actual harness integration, see [the opt-in Claude Code hook](docs
 
 For live screenshot-to-browser correlation, see [macOS monitoring setup](docs/macos-monitor.md). The browser extension observes file selection, drag/drop, and paste on supported AI pages. It only reports a completed HTTP request when the request body contains an exact digest match; this does not prove what the server retained. Opt-in prompt and Keychain-command hooks are available for [Claude Code](docs/claude-code.md) and [Codex](docs/codex.md).
 
+For read-only setup checks and bounded retrospective summaries of Guard's own logs, see [local operations](docs/operations.md).
+
 For the experimental macOS Endpoint Security sensor and an entitlement-free replay, see [the sensor notes](docs/endpoint-security.md). The live sensor is not usable as an unsigned Cargo binary and does not identify Keychain item retrieval through `securityd`.
 
 ## Event contract
