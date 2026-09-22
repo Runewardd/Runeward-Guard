@@ -28,6 +28,8 @@ For the first actual harness integration, see [the opt-in Claude Code hook](docs
 
 For live screenshot-to-browser correlation, see [macOS monitoring setup](docs/macos-monitor.md). The browser extension observes file selection, drag/drop, and paste on supported AI pages; it cannot prove that the site completed an upload.
 
+For the experimental macOS Endpoint Security sensor and an entitlement-free replay, see [the sensor notes](docs/endpoint-security.md). The live sensor is not usable as an unsigned Cargo binary and does not identify Keychain item retrieval through `securityd`.
+
 ## Event contract
 
 Every event needs `id`, RFC 3339 `time`, and `kind`. The supported kinds are:
