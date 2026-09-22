@@ -68,8 +68,11 @@ pub fn read_event(stream: &mut UnixStream) -> Result<Event, String> {
         return Err("browser event too large".into());
     }
     let event: Event = parse_exact(&data)?;
-    if event.kind != "file_attach" || !event.text.is_empty() || !event.path.is_empty() {
-        return Err("only metadata-only file_attach is accepted".into());
+    if !matches!(event.kind.as_str(), "file_attach" | "image_paste")
+        || !event.text.is_empty()
+        || !event.path.is_empty()
+    {
+        return Err("only metadata-only browser image events are accepted".into());
     }
     Ok(event)
 }

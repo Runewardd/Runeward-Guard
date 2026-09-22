@@ -1,6 +1,6 @@
 # Experimental macOS screenshot monitoring
 
-This path gives Guard two real, opt-in observations: a newly seen image file with macOS screenshot metadata in a folder you select, and image selection/drop/paste on `chatgpt.com` or `claude.ai` in Google Chrome. A matching SHA-256 digest produces a warning. It does **not** prove upload completion or cover all screenshot locations, browsers, or desktop apps.
+This path gives Guard two real, opt-in observations: a newly seen image file with macOS screenshot metadata in a folder you select, and image selection/drop/paste on `chatgpt.com` or `claude.ai` in Google Chrome. A matching SHA-256 digest produces a screenshot warning. An image pasted from the clipboard also produces a lower-confidence warning even if no saved screenshot is found. It does **not** prove screenshot provenance for an unmatched clipboard image or upload completion, and does not cover all screenshot locations, browsers, or desktop apps.
 
 ## Build and run
 
@@ -16,7 +16,7 @@ Start the monitor with the **absolute path** to your screenshot folder. It basel
 ./target/release/guard monitor --dir /absolute/path/to/screenshots
 ```
 
-Guard reads only image files up to 32 MiB in that folder and checks for the `com.apple.metadata:kMDItemIsScreenCapture` attribute. It hashes matching files locally and emits no image path or bytes in findings. A screenshot saved only to the clipboard will not be detected by the folder monitor.
+Guard reads only image files up to 32 MiB in that folder and checks for the `com.apple.metadata:kMDItemIsScreenCapture` attribute. It hashes matching files locally and emits no image path or bytes in findings. A screenshot saved only to the clipboard will not be identified as a screenshot by the folder monitor; a paste into a supported AI page can still trigger the lower-confidence image-paste warning.
 
 ## Connect Google Chrome
 

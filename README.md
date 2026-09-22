@@ -43,6 +43,7 @@ Events in a feed must be ordered by timestamp. IDs are 1–128 ASCII letters, di
 | `screen_capture` | Absolute `path` or SHA-256 `digest` | Remembers a one-way path key or image digest in memory for 15 minutes. The macOS observer sends only a digest. |
 | `file_upload` | `path`, `destination` | Warns when that same captured path was uploaded to a recognized AI destination within 15 minutes. |
 | `file_attach` | SHA-256 `digest`, `destination` | Warns when a recently observed screenshot is selected on a supported AI page. It does not confirm delivery. |
+| `image_paste` | SHA-256 `digest`, `destination` | Warns on an image pasted into a supported AI page, including clipboard-only images. Without a matching saved screenshot, Guard cannot establish screenshot provenance; it does not confirm delivery. |
 
 `harness` names the adapter-supplied source, such as `codex`, `claude`, or `copilot`. `application` is optional context. `destination` must be an HTTPS or WSS URL; hostnames are matched on exact domain boundaries, not substrings. A `file_upload` event must mean an actual upload observed by a trusted adapter, not merely that a file was opened or selected. Path-only correlation cannot prove the same file bytes were uploaded if a path was reused.
 

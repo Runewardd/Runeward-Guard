@@ -10,7 +10,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   if (!allowedOrigins.has(origin) ||
-      message?.kind !== "file_attach" ||
+      !["file_attach", "image_paste"].includes(message?.kind) ||
       !digestPattern.test(message.digest)) {
     sendResponse({ ok: false });
     return false;
@@ -18,7 +18,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   chrome.runtime.sendNativeMessage(
     "com.runeward.guard",
-    { kind: "file_attach", digest: message.digest, destination: origin },
+    { kind: message.kind, digest: message.digest, destination: origin },
     (reply) => {
       sendResponse({ ok: !chrome.runtime.lastError && reply?.ok === true });
     },

@@ -1,7 +1,7 @@
 use runeward_guard::MAX_EVENT_BYTES;
 use runeward_guard::parse_exact;
 use runeward_guard::sensor::{Observation, SensorEngine};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 fn replay<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
     let mut engine = SensorEngine::default();
@@ -9,8 +9,7 @@ fn replay<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<(), Str
     let mut number = 0;
     loop {
         line.clear();
-        let count = (&mut *input)
-            .take((MAX_EVENT_BYTES + 1) as u64)
+        let count = Read::take(&mut *input, (MAX_EVENT_BYTES + 1) as u64)
             .read_until(b'\n', &mut line)
             .map_err(|error| error.to_string())?;
         if count == 0 {

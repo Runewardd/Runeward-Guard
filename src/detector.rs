@@ -244,7 +244,7 @@ impl Detector {
                     ));
                 }
             }
-            "file_attach" => {
+            "file_attach" | "image_paste" => {
                 if !valid_digest(&event.digest)
                     || event.destination.is_empty()
                     || !event.text.is_empty()
@@ -264,6 +264,10 @@ impl Detector {
                     {
                         result.decision = "warn".into();
                         result.findings.push(finding("screenshot_selected_for_ai", "high", "A recently captured screenshot was selected for an AI page; upload is not confirmed."));
+                    } else if event.kind == "image_paste" {
+                        result.decision = "warn".into();
+                        result.findings.push(finding("image_pasted_into_ai", "medium", "An image was pasted into an AI page; screenshot provenance and upload are not confirmed."));
+                        self.attachments.insert(event.digest.clone(), event.time);
                     } else {
                         self.attachments.insert(event.digest.clone(), event.time);
                     }
@@ -313,5 +317,31 @@ mod tests {
         assert!(is_ai_destination("https://chatgpt.com/"));
         assert!(!is_ai_destination("https://chatgpt.com.evil.invalid/"));
         assert!(!is_ai_destination("https://evil.invalid@chatgpt.com/"));
+    }
+
+    #[test]
+    fn clipboard_image_warns_without_claiming_screenshot_or_upload() {
+        let mut event = Event::new("one".into(), "image_paste");
+        event.digest = "a".repeat(64);
+        event.destination = "https://claude.ai".into();
+        let result = Detector::default().inspect(&event).unwrap();
+        assert_eq!(result.decision, "warn");
+        assert_eq!(result.findings[0].rule, "image_pasted_into_ai");
+        assert!(!result.findings[0].message.contains("uploaded"));
+    }
+
+    #[test]
+    fn clipboard_image_correlates_with_known_screenshot() {
+        let digest = "a".repeat(64);
+        let mut capture = Event::new("one".into(), "screen_capture");
+        capture.digest = digest.clone();
+        let mut paste = Event::new("two".into(), "image_paste");
+        paste.time = capture.time + Duration::seconds(1);
+        paste.digest = digest;
+        paste.destination = "https://chatgpt.com".into();
+        let mut detector = Detector::default();
+        detector.inspect(&capture).unwrap();
+        let result = detector.inspect(&paste).unwrap();
+        assert_eq!(result.findings[0].rule, "screenshot_selected_for_ai");
     }
 }
