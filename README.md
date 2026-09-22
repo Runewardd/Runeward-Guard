@@ -2,7 +2,7 @@
 
 Runeward Guard is a separate endpoint-side project intended to complement [Runeward](https://github.com/Runewardd/runeward). Runeward governs agents inside its sandbox; Guard is being built to detect risky activity by AI harnesses on a person's own machine.
 
-**Current status: experimental endpoint monitoring, not a complete EDR.** Guard can watch a selected macOS folder for files bearing Apple's screenshot marker and correlate their local SHA-256 digests with image-selection events from an opt-in Chrome extension on ChatGPT and Claude. The extension can also confirm a narrow class of matching completed HTTP requests. It provides opt-in Claude Code and Codex prompt hooks. It does not observe all Keychain access, cover most browser upload methods, inspect other browsers or desktop AI apps, or install a system extension. Do not rely on it as complete disclosure prevention.
+**Current status: experimental endpoint monitoring, not a complete EDR.** Guard can watch a selected macOS folder for files bearing Apple's screenshot marker and correlate their local SHA-256 digests with image-selection events from an opt-in Chrome extension on ChatGPT and Claude. The extension can also confirm a narrow class of matching completed HTTP requests. It provides opt-in Claude Code, Codex, and Copilot CLI hooks. It does not observe all Keychain access, cover most browser upload methods, inspect other browsers or desktop AI apps, or install a system extension. Do not rely on it as complete disclosure prevention.
 
 ## Try the first slice
 
@@ -26,7 +26,7 @@ printf '%s\n' '{"id":"example","time":"2026-09-21T12:00:00Z","kind":"prompt_subm
 
 For the first actual harness integration, see [the opt-in Claude Code hook](docs/claude-code.md). It blocks a detected password-like string, token, or private-key header before Claude processes a submitted text prompt. It does not cover every way Claude can receive sensitive information.
 
-For live screenshot-to-browser correlation, see [macOS monitoring setup](docs/macos-monitor.md). The browser extension observes file selection, drag/drop, and paste on supported AI pages. It only reports a completed HTTP request when the request body contains an exact digest match; this does not prove what the server retained. Opt-in prompt and Keychain-command hooks are available for [Claude Code](docs/claude-code.md) and [Codex](docs/codex.md).
+For live screenshot-to-browser correlation, see [macOS monitoring setup](docs/macos-monitor.md). The browser extension observes file selection, drag/drop, and paste on supported AI pages. It only reports a completed HTTP request when the request body contains an exact digest match; this does not prove what the server retained. Opt-in hooks are available for [Claude Code](docs/claude-code.md), [Codex](docs/codex.md), and [Copilot CLI](docs/copilot-cli.md), with different enforcement limits on each surface.
 
 For read-only setup checks and bounded retrospective summaries of Guard's own logs, see [local operations](docs/operations.md).
 

@@ -28,6 +28,19 @@ struct CodexPromptInput {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopilotPromptInput {
+    transformed_prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopilotToolInput {
+    tool_name: String,
+    tool_args: serde_json::Value,
+}
+
+#[derive(Deserialize)]
 struct ToolInput {
     hook_event_name: String,
     tool_name: String,
@@ -229,6 +242,79 @@ fn codex_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(
         );
     }
     Ok(())
+}
+
+fn copilot_prompt_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return copilot_replace(output),
+    };
+    let hook: CopilotPromptInput = match parse_exact(&data) {
+        Ok(hook) => hook,
+        Err(_) => return copilot_replace(output),
+    };
+    if hook.transformed_prompt.is_empty() {
+        return copilot_replace(output);
+    }
+    let mut event = Event::new("copilot-prompt".into(), "prompt_submit");
+    event.harness = "copilot".into();
+    event.text = hook.transformed_prompt;
+    match Detector::default().inspect(&event) {
+        Ok(result) if result.decision == "block" => copilot_replace(output),
+        Ok(_) => Ok(()),
+        Err(_) => copilot_replace(output),
+    }
+}
+
+fn copilot_replace<W: Write>(output: &mut W) -> Result<(), String> {
+    serde_json::to_writer(&mut *output, &serde_json::json!({
+        "modifiedTransformedPrompt": "Runeward Guard removed a possible secret from this message. Ask the user to resubmit without secrets."
+    })).map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn copilot_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return copilot_deny(output, "Runeward Guard could not inspect this tool call."),
+    };
+    let Ok(hook): Result<CopilotToolInput, _> = parse_exact(&data) else {
+        return copilot_deny(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if !matches!(hook.tool_name.as_str(), "bash" | "powershell") {
+        return Ok(());
+    }
+    let args = if let Some(encoded) = hook.tool_args.as_str() {
+        serde_json::from_str::<serde_json::Value>(encoded).ok()
+    } else {
+        Some(hook.tool_args)
+    };
+    let command = args
+        .as_ref()
+        .and_then(|args| args.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|command| !command.is_empty());
+    let Some(command) = command else {
+        return copilot_deny(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if keychain_command(command) {
+        return copilot_deny(
+            output,
+            "Runeward Guard blocked a Keychain-related tool command.",
+        );
+    }
+    Ok(())
+}
+
+fn copilot_deny<W: Write>(output: &mut W, reason: &str) -> Result<(), String> {
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({
+            "permissionDecision": "deny", "permissionDecisionReason": reason
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
 }
 
 fn setup_command(args: &[String], output: &mut impl Write) -> Result<(), String> {
@@ -557,7 +643,7 @@ fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
         return Err(
-            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|doctor|audit-summary|monitor|setup-chrome|setup-launch-agent>".into(),
+            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|copilot-prompt-hook|copilot-tool-hook|doctor|audit-summary|monitor|setup-chrome|setup-launch-agent>".into(),
         );
     };
     let mut stdout = io::stdout().lock();
@@ -577,6 +663,12 @@ fn run() -> Result<i32, String> {
         }
         "codex-tool-hook" if args.len() == 1 => {
             codex_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "copilot-prompt-hook" if args.len() == 1 => {
+            copilot_prompt_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "copilot-tool-hook" if args.len() == 1 => {
+            copilot_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
         }
         "doctor" => doctor(&args[1..], &mut stdout).map(|_| 0),
         "audit-summary" => audit_summary(&args[1..], &mut stdout).map(|_| 0),
@@ -648,5 +740,26 @@ mod tests {
         let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(status["endpoint_security_live"], "not_verified");
         assert_eq!(status["watch_directory"], "not_checked");
+    }
+
+    #[test]
+    fn copilot_prompt_replaces_model_facing_secret_without_echo() {
+        let mut output = Vec::new();
+        copilot_prompt_hook(
+            &mut br#"{"transformedPrompt":"password=example-only-credential"}"#.as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("modifiedTransformedPrompt"));
+        assert!(!text.contains("example-only-credential"));
+    }
+
+    #[test]
+    fn copilot_tool_denies_keychain_command_in_string_args() {
+        let mut output = Vec::new();
+        copilot_tool_hook(&mut br#"{"toolName":"bash","toolArgs":"{\"command\":\"security find-generic-password\"}"}"#.as_slice(), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("\"permissionDecision\":\"deny\""));
     }
 }
