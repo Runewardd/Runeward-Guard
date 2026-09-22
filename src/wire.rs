@@ -71,33 +71,6 @@ pub fn listen(path: &Path) -> Result<PrivateListener, String> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::DirBuilderExt;
-
-    #[test]
-    fn recovers_only_a_private_stale_socket() {
-        let directory = std::env::temp_dir().join(format!(
-            "runeward-guard-socket-test-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_micros()
-        ));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&directory)
-            .unwrap();
-        let path = directory.join("monitor.sock");
-        let old = UnixListener::bind(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        drop(old);
-        let replacement = listen(&path).unwrap();
-        drop(replacement);
-        assert!(!path.exists());
-        fs::remove_dir(directory).unwrap();
-    }
-}
-
 pub fn read_event(stream: &mut UnixStream) -> Result<Event, String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
@@ -143,4 +116,31 @@ pub fn send_event(path: &Path, event: &Event) -> Result<(), String> {
         return Err("monitor rejected browser event".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+
+    #[test]
+    fn recovers_only_a_private_stale_socket() {
+        let directory = Path::new("/tmp").join(format!(
+            "rgw-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_micros()
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let path = directory.join("monitor.sock");
+        let old = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        drop(old);
+        let replacement = listen(&path).unwrap();
+        drop(replacement);
+        assert!(!path.exists());
+        fs::remove_dir(directory).unwrap();
+    }
 }
