@@ -177,8 +177,10 @@ fn handle_message(data: &[u8], socket: &Path) -> HostResponse {
             error: Some("invalid attachment metadata"),
         };
     };
-    if !matches!(message.kind.as_str(), "file_attach" | "image_paste")
-        || !valid_digest(&message.digest)
+    if !matches!(
+        message.kind.as_str(),
+        "file_attach" | "image_paste" | "image_request_completed"
+    ) || !valid_digest(&message.digest)
     {
         return HostResponse {
             ok: false,

@@ -273,6 +273,30 @@ impl Detector {
                     }
                 }
             }
+            "image_request_completed" => {
+                if !valid_digest(&event.digest)
+                    || event.destination.is_empty()
+                    || !event.text.is_empty()
+                    || !event.path.is_empty()
+                {
+                    return Err("image_request_completed requires a SHA-256 digest, destination, and no path or text".into());
+                }
+                if is_ai_destination(&event.destination) {
+                    result.decision = "warn".into();
+                    if self
+                        .captures
+                        .get(&format!("sha256:{}", event.digest))
+                        .is_some_and(|time| {
+                            event.time >= *time
+                                && event.time.signed_duration_since(*time) <= Duration::minutes(15)
+                        })
+                    {
+                        result.findings.push(finding("screenshot_http_request_completed", "high", "A completed HTTP request to an AI destination contained the exact bytes of a recently observed screenshot; server retention is unknown."));
+                    } else {
+                        result.findings.push(finding("image_http_request_completed", "medium", "A completed HTTP request to an AI destination contained the exact bytes of a recently selected image; screenshot provenance is unknown."));
+                    }
+                }
+            }
             _ => return Err(format!("unsupported event kind {:?}", event.kind)),
         }
         self.last_time = Some(event.time);
@@ -343,5 +367,20 @@ mod tests {
         detector.inspect(&capture).unwrap();
         let result = detector.inspect(&paste).unwrap();
         assert_eq!(result.findings[0].rule, "screenshot_selected_for_ai");
+    }
+
+    #[test]
+    fn completed_request_correlates_exact_screenshot_digest() {
+        let digest = "b".repeat(64);
+        let mut capture = Event::new("one".into(), "screen_capture");
+        capture.digest = digest.clone();
+        let mut request = Event::new("two".into(), "image_request_completed");
+        request.time = capture.time + Duration::seconds(1);
+        request.digest = digest;
+        request.destination = "https://chatgpt.com".into();
+        let mut detector = Detector::default();
+        detector.inspect(&capture).unwrap();
+        let result = detector.inspect(&request).unwrap();
+        assert_eq!(result.findings[0].rule, "screenshot_http_request_completed");
     }
 }
