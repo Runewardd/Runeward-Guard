@@ -3,6 +3,7 @@ pub mod detector;
 pub mod host;
 pub mod observer;
 pub mod sensor;
+pub mod service;
 pub mod wire;
 
 use serde::de::DeserializeOwned;

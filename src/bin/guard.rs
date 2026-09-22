@@ -3,7 +3,7 @@ use regex::Regex;
 use runeward_guard::MAX_EVENT_BYTES;
 use runeward_guard::audit;
 use runeward_guard::detector::{Detector, Event};
-use runeward_guard::{host, observer, parse_exact, wire};
+use runeward_guard::{host, observer, parse_exact, service, wire};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -350,18 +350,77 @@ fn audit_summary(args: &[String], output: &mut impl Write) -> Result<(), String>
     writeln!(output).map_err(|error| error.to_string())
 }
 
+fn setup_launch_agent(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let mut binary = None;
+    let mut watch = None;
+    let mut audit = None;
+    let mut retain_days = 30u32;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--binary" => {
+                binary = Some(PathBuf::from(rest.next().ok_or("missing --binary value")?))
+            }
+            "--dir" => watch = Some(PathBuf::from(rest.next().ok_or("missing --dir value")?)),
+            "--audit-dir" => {
+                audit = Some(PathBuf::from(
+                    rest.next().ok_or("missing --audit-dir value")?,
+                ))
+            }
+            "--retain-days" => {
+                retain_days = rest
+                    .next()
+                    .ok_or("missing --retain-days value")?
+                    .parse()
+                    .map_err(|_| "--retain-days must be a number")?;
+            }
+            _ => return Err(format!("unexpected setup-launch-agent argument: {arg}")),
+        }
+    }
+    let path = service::setup_monitor_agent(
+        &binary.ok_or("setup-launch-agent requires --binary")?,
+        &watch.ok_or("setup-launch-agent requires --dir")?,
+        &audit.ok_or("setup-launch-agent requires --audit-dir")?,
+        retain_days,
+    )?;
+    writeln!(
+        output,
+        "Launch agent written (not loaded): {}",
+        path.display()
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err("monitor currently requires macOS".into());
     }
     let mut directory = None;
     let mut socket = None;
+    let mut audit_dir = None;
+    let mut retain_days = 30u32;
+    let mut retention_custom = false;
     let mut interval = Duration::from_secs(2);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "--dir" => directory = rest.next().map(PathBuf::from),
-            "--socket" => socket = rest.next().map(PathBuf::from),
+            "--dir" => directory = Some(PathBuf::from(rest.next().ok_or("missing --dir value")?)),
+            "--socket" => {
+                socket = Some(PathBuf::from(rest.next().ok_or("missing --socket value")?))
+            }
+            "--audit-dir" => {
+                audit_dir = Some(PathBuf::from(
+                    rest.next().ok_or("missing --audit-dir value")?,
+                ))
+            }
+            "--retain-days" => {
+                retain_days = rest
+                    .next()
+                    .ok_or("missing --retain-days value")?
+                    .parse()
+                    .map_err(|_| "--retain-days must be a number")?;
+                retention_custom = true;
+            }
             "--interval" => {
                 interval = parse_duration(rest.next().ok_or("missing --interval value")?)?
             }
@@ -370,6 +429,9 @@ fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), Strin
     }
     if interval < Duration::from_millis(250) {
         return Err("monitor requires --interval >= 250ms".into());
+    }
+    if retention_custom && audit_dir.is_none() {
+        return Err("--retain-days requires --audit-dir".into());
     }
     let directory = directory.ok_or("monitor requires --dir")?;
     let socket = match socket {
@@ -381,7 +443,12 @@ fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), Strin
         directory.display(),
         socket.display()
     );
-    run_monitor(directory, socket, interval, output)
+    if let Some(audit_dir) = audit_dir {
+        let mut log = audit::DailyAuditLog::new(audit_dir, retain_days)?;
+        run_monitor(directory, socket, interval, &mut log)
+    } else {
+        run_monitor(directory, socket, interval, output)
+    }
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {
@@ -414,8 +481,11 @@ fn process_event<W: Write>(
         decision: &result.decision,
         findings: &result.findings,
     };
-    serde_json::to_writer(&mut *output, &record).map_err(|error| error.to_string())?;
-    writeln!(output).map_err(|error| error.to_string())?;
+    let mut encoded = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+    encoded.push(b'\n');
+    output
+        .write_all(&encoded)
+        .map_err(|error| error.to_string())?;
     output.flush().map_err(|error| error.to_string())
 }
 
@@ -463,7 +533,8 @@ fn run_monitor<W: Write>(
                 let mut accepted = false;
                 if let Ok(mut event) = event {
                     scan(&mut scanner, &mut detector, output)?;
-                    accepted = process_event(&mut event, &mut detector, output).is_ok();
+                    process_event(&mut event, &mut detector, output)?;
+                    accepted = true;
                 }
                 let _ = stream.write_all(&[u8::from(accepted)]);
                 if !accepted {
@@ -486,7 +557,7 @@ fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
         return Err(
-            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|doctor|audit-summary|monitor|setup-chrome>".into(),
+            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|doctor|audit-summary|monitor|setup-chrome|setup-launch-agent>".into(),
         );
     };
     let mut stdout = io::stdout().lock();
@@ -511,6 +582,7 @@ fn run() -> Result<i32, String> {
         "audit-summary" => audit_summary(&args[1..], &mut stdout).map(|_| 0),
         "monitor" => monitor_command(&args[1..], &mut stdout).map(|_| 0),
         "setup-chrome" => setup_command(&args[1..], &mut stdout).map(|_| 0),
+        "setup-launch-agent" => setup_launch_agent(&args[1..], &mut stdout).map(|_| 0),
         _ => Err("unknown command or unexpected arguments".into()),
     }
 }

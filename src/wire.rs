@@ -40,8 +40,24 @@ pub fn listen(path: &Path) -> Result<PrivateListener, String> {
     {
         return Err("socket directory must be private and owned by the current user".into());
     }
-    if fs::symlink_metadata(path).is_ok() {
-        return Err("socket path already exists; refusing to replace it".into());
+    if let Ok(existing) = fs::symlink_metadata(path) {
+        if !existing.file_type().is_socket()
+            || existing.permissions().mode() & 0o077 != 0
+            || existing.uid() != unsafe { libc::geteuid() }
+        {
+            return Err("socket path exists but is not a private owner-owned socket".into());
+        }
+        match UnixStream::connect(path) {
+            Ok(_) => return Err("monitor socket is already active".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                let current = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+                if current.dev() != existing.dev() || current.ino() != existing.ino() {
+                    return Err("socket changed while checking stale state".into());
+                }
+                fs::remove_file(path).map_err(|error| error.to_string())?;
+            }
+            Err(error) => return Err(format!("could not verify monitor socket: {error}")),
+        }
     }
     let listener = UnixListener::bind(path).map_err(|error| error.to_string())?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
@@ -53,6 +69,33 @@ pub fn listen(path: &Path) -> Result<PrivateListener, String> {
         listener,
         path: path.into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+
+    #[test]
+    fn recovers_only_a_private_stale_socket() {
+        let directory = std::env::temp_dir().join(format!(
+            "runeward-guard-socket-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_micros()
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let path = directory.join("monitor.sock");
+        let old = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        drop(old);
+        let replacement = listen(&path).unwrap();
+        drop(replacement);
+        assert!(!path.exists());
+        fs::remove_dir(directory).unwrap();
+    }
 }
 
 pub fn read_event(stream: &mut UnixStream) -> Result<Event, String> {
