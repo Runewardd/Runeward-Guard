@@ -9,7 +9,7 @@ fn replay<R: BufRead, W: Write>(input: &mut R, output: &mut W) -> Result<(), Str
     let mut number = 0;
     loop {
         line.clear();
-        let count = input
+        let count = (&mut *input)
             .take((MAX_EVENT_BYTES + 1) as u64)
             .read_until(b'\n', &mut line)
             .map_err(|error| error.to_string())?;
