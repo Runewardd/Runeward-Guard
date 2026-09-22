@@ -2,7 +2,7 @@ use crate::detector::Event;
 use crate::parse_exact;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -40,8 +40,24 @@ pub fn listen(path: &Path) -> Result<PrivateListener, String> {
     {
         return Err("socket directory must be private and owned by the current user".into());
     }
-    if fs::symlink_metadata(path).is_ok() {
-        return Err("socket path already exists; refusing to replace it".into());
+    if let Ok(existing) = fs::symlink_metadata(path) {
+        if !existing.file_type().is_socket()
+            || existing.permissions().mode() & 0o077 != 0
+            || existing.uid() != unsafe { libc::geteuid() }
+        {
+            return Err("socket path exists but is not a private owner-owned socket".into());
+        }
+        match UnixStream::connect(path) {
+            Ok(_) => return Err("monitor socket is already active".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                let current = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+                if current.dev() != existing.dev() || current.ino() != existing.ino() {
+                    return Err("socket changed while checking stale state".into());
+                }
+                fs::remove_file(path).map_err(|error| error.to_string())?;
+            }
+            Err(error) => return Err(format!("could not verify monitor socket: {error}")),
+        }
     }
     let listener = UnixListener::bind(path).map_err(|error| error.to_string())?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
@@ -68,8 +84,13 @@ pub fn read_event(stream: &mut UnixStream) -> Result<Event, String> {
         return Err("browser event too large".into());
     }
     let event: Event = parse_exact(&data)?;
-    if event.kind != "file_attach" || !event.text.is_empty() || !event.path.is_empty() {
-        return Err("only metadata-only file_attach is accepted".into());
+    if !matches!(
+        event.kind.as_str(),
+        "file_attach" | "image_paste" | "image_request_completed"
+    ) || !event.text.is_empty()
+        || !event.path.is_empty()
+    {
+        return Err("only metadata-only browser image events are accepted".into());
     }
     Ok(event)
 }
@@ -95,4 +116,31 @@ pub fn send_event(path: &Path, event: &Event) -> Result<(), String> {
         return Err("monitor rejected browser event".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+
+    #[test]
+    fn recovers_only_a_private_stale_socket() {
+        let directory = Path::new("/tmp").join(format!(
+            "rgw-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_micros()
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let path = directory.join("monitor.sock");
+        let old = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        drop(old);
+        let replacement = listen(&path).unwrap();
+        drop(replacement);
+        assert!(!path.exists());
+        fs::remove_dir(directory).unwrap();
+    }
 }

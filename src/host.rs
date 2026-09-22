@@ -177,7 +177,11 @@ fn handle_message(data: &[u8], socket: &Path) -> HostResponse {
             error: Some("invalid attachment metadata"),
         };
     };
-    if message.kind != "file_attach" || !valid_digest(&message.digest) {
+    if !matches!(
+        message.kind.as_str(),
+        "file_attach" | "image_paste" | "image_request_completed"
+    ) || !valid_digest(&message.digest)
+    {
         return HostResponse {
             ok: false,
             error: Some("invalid attachment metadata"),
@@ -194,7 +198,7 @@ fn handle_message(data: &[u8], socket: &Path) -> HostResponse {
     }
     let mut event = Event::new(
         format!("browser-{}", chrono::Utc::now().timestamp_micros()),
-        "file_attach",
+        &message.kind,
     );
     event.harness = "browser".into();
     event.digest = message.digest;
@@ -228,5 +232,16 @@ mod tests {
             Path::new("/nonexistent"),
         );
         assert!(!response.ok);
+    }
+
+    #[test]
+    fn image_paste_passes_metadata_validation() {
+        let message = format!(
+            "{{\"kind\":\"image_paste\",\"digest\":\"{}\",\"destination\":\"https://chatgpt.com\"}}",
+            "a".repeat(64)
+        );
+        let response = handle_message(message.as_bytes(), Path::new("/nonexistent"));
+        assert!(!response.ok);
+        assert_eq!(response.error, Some("Guard monitor unavailable"));
     }
 }

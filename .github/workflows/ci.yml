@@ -22,3 +22,4 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: node --check extension/chrome/background.js
       - run: node --check extension/chrome/content.js
+      - run: node --test extension/chrome/*.test.js

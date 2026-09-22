@@ -162,6 +162,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "endpoint-sec"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6aede271dff5e023e85477d13171625c7be4ca9c9f4ed1d435823b9f34d6640"
+dependencies = [
+ "endpoint-sec-sys",
+ "libc",
+ "mach2",
+]
+
+[[package]]
+name = "endpoint-sec-sys"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1479a27ba4be9093ff1de20b3aa0a0bc5165b375aa2e0e73b83bba903bd64bd5"
+dependencies = [
+ "block2",
+ "libc",
+ "mach2",
+ "objc2",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -378,6 +401,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "mach2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d28e293f2b8c9d2b2d1c0193bd3c1cbdc0d2cf396888dc01162f7cf9d6c3f3"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -499,6 +528,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "ctrlc",
+ "endpoint-sec",
  "hex",
  "libc",
  "regex",

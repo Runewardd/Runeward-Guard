@@ -1,10 +1,13 @@
 use chrono::Utc;
 use regex::Regex;
 use runeward_guard::MAX_EVENT_BYTES;
+use runeward_guard::audit;
 use runeward_guard::detector::{Detector, Event};
-use runeward_guard::{host, observer, parse_exact, wire};
+use runeward_guard::{host, observer, parse_exact, service, wire};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::{self, BufRead, Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +19,25 @@ use std::time::{Duration, Instant};
 struct ClaudeInput {
     hook_event_name: String,
     prompt: String,
+}
+
+#[derive(Deserialize)]
+struct CodexPromptInput {
+    hook_event_name: String,
+    prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopilotPromptInput {
+    transformed_prompt: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopilotToolInput {
+    tool_name: String,
+    tool_args: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -122,9 +144,47 @@ fn claude_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), S
     }
 }
 
+fn codex_block<W: Write>(output: &mut W, reason: &str) -> Result<(), String> {
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({"decision":"block","reason":reason}),
+    )
+    .map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn codex_prompt_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return codex_block(output, "Runeward Guard could not inspect this prompt."),
+    };
+    let Ok(hook): Result<CodexPromptInput, _> = parse_exact(&data) else {
+        return codex_block(output, "Runeward Guard could not inspect this prompt.");
+    };
+    if hook.hook_event_name != "UserPromptSubmit" || hook.prompt.is_empty() {
+        return codex_block(output, "Runeward Guard could not inspect this prompt.");
+    }
+    let mut event = Event::new("codex-prompt".into(), "prompt_submit");
+    event.harness = "codex".into();
+    event.text = hook.prompt;
+    match Detector::default().inspect(&event) {
+        Ok(result) if result.decision == "block" => codex_block(
+            output,
+            "Runeward Guard detected a possible secret in this prompt.",
+        ),
+        Ok(_) => Ok(()),
+        Err(_) => codex_block(output, "Runeward Guard could not inspect this prompt."),
+    }
+}
+
 fn tool_deny<W: Write>(output: &mut W, reason: &str) -> Result<(), String> {
     serde_json::to_writer(&mut *output, &serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}})).map_err(|error| error.to_string())?;
     writeln!(output).map_err(|error| error.to_string())
+}
+
+fn keychain_command(command: &str) -> bool {
+    let keychain_cli = Regex::new(r"(?i)(?:^|[^a-z0-9_])(?:/usr/bin/)?security\s+(?:find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain)\b").expect("constant regex");
+    keychain_cli.is_match(command) || command.to_ascii_lowercase().contains("library/keychains/")
 }
 
 fn claude_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
@@ -148,16 +208,113 @@ fn claude_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<
     else {
         return tool_deny(output, "Runeward Guard could not inspect this tool call.");
     };
-    let keychain_cli = Regex::new(r"(?i)(?:^|[^a-z0-9_])(?:/usr/bin/)?security\s+(?:find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain)\b").expect("constant regex");
-    if keychain_cli.is_match(&command)
-        || command.to_ascii_lowercase().contains("library/keychains/")
-    {
+    if keychain_command(&command) {
         return tool_deny(
             output,
             "Runeward Guard blocked a Keychain-related tool command.",
         );
     }
     Ok(())
+}
+
+fn codex_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return codex_block(output, "Runeward Guard could not inspect this tool call."),
+    };
+    let Ok(hook): Result<ToolInput, _> = parse_exact(&data) else {
+        return codex_block(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if hook.hook_event_name != "PreToolUse" || hook.tool_name != "Bash" {
+        return codex_block(output, "Runeward Guard could not inspect this tool call.");
+    }
+    let Some(command) = hook
+        .tool_input
+        .and_then(|tool| tool.command)
+        .filter(|command| !command.is_empty())
+    else {
+        return codex_block(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if keychain_command(&command) {
+        return codex_block(
+            output,
+            "Runeward Guard blocked a Keychain-related tool command.",
+        );
+    }
+    Ok(())
+}
+
+fn copilot_prompt_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return copilot_replace(output),
+    };
+    let hook: CopilotPromptInput = match parse_exact(&data) {
+        Ok(hook) => hook,
+        Err(_) => return copilot_replace(output),
+    };
+    if hook.transformed_prompt.is_empty() {
+        return copilot_replace(output);
+    }
+    let mut event = Event::new("copilot-prompt".into(), "prompt_submit");
+    event.harness = "copilot".into();
+    event.text = hook.transformed_prompt;
+    match Detector::default().inspect(&event) {
+        Ok(result) if result.decision == "block" => copilot_replace(output),
+        Ok(_) => Ok(()),
+        Err(_) => copilot_replace(output),
+    }
+}
+
+fn copilot_replace<W: Write>(output: &mut W) -> Result<(), String> {
+    serde_json::to_writer(&mut *output, &serde_json::json!({
+        "modifiedTransformedPrompt": "Runeward Guard removed a possible secret from this message. Ask the user to resubmit without secrets."
+    })).map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn copilot_tool_hook<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), String> {
+    let data = match read_limited(input) {
+        Ok(data) => data,
+        Err(_) => return copilot_deny(output, "Runeward Guard could not inspect this tool call."),
+    };
+    let Ok(hook): Result<CopilotToolInput, _> = parse_exact(&data) else {
+        return copilot_deny(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if !matches!(hook.tool_name.as_str(), "bash" | "powershell") {
+        return Ok(());
+    }
+    let args = if let Some(encoded) = hook.tool_args.as_str() {
+        serde_json::from_str::<serde_json::Value>(encoded).ok()
+    } else {
+        Some(hook.tool_args)
+    };
+    let command = args
+        .as_ref()
+        .and_then(|args| args.get("command"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|command| !command.is_empty());
+    let Some(command) = command else {
+        return copilot_deny(output, "Runeward Guard could not inspect this tool call.");
+    };
+    if keychain_command(command) {
+        return copilot_deny(
+            output,
+            "Runeward Guard blocked a Keychain-related tool command.",
+        );
+    }
+    Ok(())
+}
+
+fn copilot_deny<W: Write>(output: &mut W, reason: &str) -> Result<(), String> {
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({
+            "permissionDecision": "deny", "permissionDecisionReason": reason
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
 }
 
 fn setup_command(args: &[String], output: &mut impl Write) -> Result<(), String> {
@@ -183,18 +340,173 @@ fn setup_command(args: &[String], output: &mut impl Write) -> Result<(), String>
     .map_err(|error| error.to_string())
 }
 
+fn doctor(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let directory = match args {
+        [] => None,
+        [flag, path] if flag == "--dir" => Some(Path::new(path)),
+        _ => return Err("usage: guard doctor [--dir ABSOLUTE_SCREENSHOT_DIRECTORY]".into()),
+    };
+    let watch_directory = match directory {
+        None => "not_checked",
+        Some(path) if path.is_absolute() && path.is_dir() && fs::read_dir(path).is_ok() => {
+            "readable"
+        }
+        Some(_) => "unavailable",
+    };
+    let host_config = host::load_config();
+    let browser_host_config = match &host_config {
+        Ok(_) => "valid",
+        Err(_) => match std::env::var_os("HOME") {
+            Some(home) => match fs::symlink_metadata(
+                PathBuf::from(home).join(".runeward-guard/browser-host.json"),
+            ) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => "not_configured",
+                _ => "invalid",
+            },
+            None => "unavailable",
+        },
+    };
+    let socket_path = host_config
+        .as_ref()
+        .map(|config| config.socket.clone())
+        .ok()
+        .or_else(|| wire::socket_path().ok());
+    let monitor_socket = match socket_path {
+        Some(path) => match fs::symlink_metadata(path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.permissions().mode() & 0o077 == 0
+                    && metadata.uid() == unsafe { libc::geteuid() } =>
+            {
+                "present_private"
+            }
+            Ok(_) => "unsafe_or_not_socket",
+            Err(error) if error.kind() == io::ErrorKind::NotFound => "absent",
+            Err(_) => "unavailable",
+        },
+        None => "unavailable",
+    };
+    serde_json::to_writer(
+        &mut *output,
+        &serde_json::json!({
+            "macos_supported": cfg!(target_os = "macos"),
+            "watch_directory": watch_directory,
+            "browser_host_config": browser_host_config,
+            "monitor_socket": monitor_socket,
+            "endpoint_security_live": "not_verified"
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn audit_summary(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let mut file = None;
+    let mut since = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--file" => file = rest.next().map(PathBuf::from),
+            "--since" => {
+                let value = rest.next().ok_or("missing --since value")?;
+                since = Some(
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .map_err(|_| "--since requires an RFC 3339 timestamp")?
+                        .with_timezone(&Utc),
+                );
+            }
+            _ => return Err(format!("unexpected audit-summary argument: {arg}")),
+        }
+    }
+    let path = file.ok_or("audit-summary requires --file")?;
+    if !path.is_absolute() {
+        return Err("audit-summary requires an absolute file path".into());
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.len() > audit::MAX_AUDIT_FILE_BYTES
+    {
+        return Err("audit file must be an owner-only regular file of at most 64 MiB".into());
+    }
+    let mut input = io::BufReader::new(fs::File::open(path).map_err(|error| error.to_string())?);
+    let summary = audit::summarize(&mut input, since)?;
+    serde_json::to_writer(&mut *output, &summary).map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn setup_launch_agent(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let mut binary = None;
+    let mut watch = None;
+    let mut audit = None;
+    let mut retain_days = 30u32;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--binary" => {
+                binary = Some(PathBuf::from(rest.next().ok_or("missing --binary value")?))
+            }
+            "--dir" => watch = Some(PathBuf::from(rest.next().ok_or("missing --dir value")?)),
+            "--audit-dir" => {
+                audit = Some(PathBuf::from(
+                    rest.next().ok_or("missing --audit-dir value")?,
+                ))
+            }
+            "--retain-days" => {
+                retain_days = rest
+                    .next()
+                    .ok_or("missing --retain-days value")?
+                    .parse()
+                    .map_err(|_| "--retain-days must be a number")?;
+            }
+            _ => return Err(format!("unexpected setup-launch-agent argument: {arg}")),
+        }
+    }
+    let path = service::setup_monitor_agent(
+        &binary.ok_or("setup-launch-agent requires --binary")?,
+        &watch.ok_or("setup-launch-agent requires --dir")?,
+        &audit.ok_or("setup-launch-agent requires --audit-dir")?,
+        retain_days,
+    )?;
+    writeln!(
+        output,
+        "Launch agent written (not loaded): {}",
+        path.display()
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err("monitor currently requires macOS".into());
     }
     let mut directory = None;
     let mut socket = None;
+    let mut audit_dir = None;
+    let mut retain_days = 30u32;
+    let mut retention_custom = false;
     let mut interval = Duration::from_secs(2);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "--dir" => directory = rest.next().map(PathBuf::from),
-            "--socket" => socket = rest.next().map(PathBuf::from),
+            "--dir" => directory = Some(PathBuf::from(rest.next().ok_or("missing --dir value")?)),
+            "--socket" => {
+                socket = Some(PathBuf::from(rest.next().ok_or("missing --socket value")?))
+            }
+            "--audit-dir" => {
+                audit_dir = Some(PathBuf::from(
+                    rest.next().ok_or("missing --audit-dir value")?,
+                ))
+            }
+            "--retain-days" => {
+                retain_days = rest
+                    .next()
+                    .ok_or("missing --retain-days value")?
+                    .parse()
+                    .map_err(|_| "--retain-days must be a number")?;
+                retention_custom = true;
+            }
             "--interval" => {
                 interval = parse_duration(rest.next().ok_or("missing --interval value")?)?
             }
@@ -203,6 +515,9 @@ fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), Strin
     }
     if interval < Duration::from_millis(250) {
         return Err("monitor requires --interval >= 250ms".into());
+    }
+    if retention_custom && audit_dir.is_none() {
+        return Err("--retain-days requires --audit-dir".into());
     }
     let directory = directory.ok_or("monitor requires --dir")?;
     let socket = match socket {
@@ -214,7 +529,12 @@ fn monitor_command(args: &[String], output: &mut impl Write) -> Result<(), Strin
         directory.display(),
         socket.display()
     );
-    run_monitor(directory, socket, interval, output)
+    if let Some(audit_dir) = audit_dir {
+        let mut log = audit::DailyAuditLog::new(audit_dir, retain_days)?;
+        run_monitor(directory, socket, interval, &mut log)
+    } else {
+        run_monitor(directory, socket, interval, output)
+    }
 }
 
 fn parse_duration(raw: &str) -> Result<Duration, String> {
@@ -247,8 +567,11 @@ fn process_event<W: Write>(
         decision: &result.decision,
         findings: &result.findings,
     };
-    serde_json::to_writer(&mut *output, &record).map_err(|error| error.to_string())?;
-    writeln!(output).map_err(|error| error.to_string())?;
+    let mut encoded = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+    encoded.push(b'\n');
+    output
+        .write_all(&encoded)
+        .map_err(|error| error.to_string())?;
     output.flush().map_err(|error| error.to_string())
 }
 
@@ -296,7 +619,8 @@ fn run_monitor<W: Write>(
                 let mut accepted = false;
                 if let Ok(mut event) = event {
                     scan(&mut scanner, &mut detector, output)?;
-                    accepted = process_event(&mut event, &mut detector, output).is_ok();
+                    process_event(&mut event, &mut detector, output)?;
+                    accepted = true;
                 }
                 let _ = stream.write_all(&[u8::from(accepted)]);
                 if !accepted {
@@ -319,7 +643,7 @@ fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
         return Err(
-            "usage: guard <inspect|check|claude-hook|claude-tool-hook|monitor|setup-chrome>".into(),
+            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|copilot-prompt-hook|copilot-tool-hook|doctor|audit-summary|monitor|setup-chrome|setup-launch-agent>".into(),
         );
     };
     let mut stdout = io::stdout().lock();
@@ -334,8 +658,23 @@ fn run() -> Result<i32, String> {
         "claude-tool-hook" if args.len() == 1 => {
             claude_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
         }
+        "codex-prompt-hook" if args.len() == 1 => {
+            codex_prompt_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "codex-tool-hook" if args.len() == 1 => {
+            codex_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "copilot-prompt-hook" if args.len() == 1 => {
+            copilot_prompt_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "copilot-tool-hook" if args.len() == 1 => {
+            copilot_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
+        }
+        "doctor" => doctor(&args[1..], &mut stdout).map(|_| 0),
+        "audit-summary" => audit_summary(&args[1..], &mut stdout).map(|_| 0),
         "monitor" => monitor_command(&args[1..], &mut stdout).map(|_| 0),
         "setup-chrome" => setup_command(&args[1..], &mut stdout).map(|_| 0),
+        "setup-launch-agent" => setup_launch_agent(&args[1..], &mut stdout).map(|_| 0),
         _ => Err("unknown command or unexpected arguments".into()),
     }
 }
@@ -372,5 +711,55 @@ mod tests {
                 .unwrap()
                 .contains("\"permissionDecision\":\"deny\"")
         );
+    }
+
+    #[test]
+    fn codex_prompt_is_blocked_without_echo() {
+        let mut output = Vec::new();
+        codex_prompt_hook(&mut br#"{"hook_event_name":"UserPromptSubmit","session_id":"test","prompt":"password=example-only-credential"}"#.as_slice(), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("\"decision\":\"block\""));
+        assert!(!text.contains("example-only-credential"));
+    }
+
+    #[test]
+    fn codex_keychain_command_is_blocked() {
+        let mut output = Vec::new();
+        codex_tool_hook(&mut br#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"security find-generic-password"}}"#.as_slice(), &mut output).unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("\"decision\":\"block\"")
+        );
+    }
+
+    #[test]
+    fn doctor_is_explicit_about_unverified_endpoint_security() {
+        let mut output = Vec::new();
+        doctor(&[], &mut output).unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(status["endpoint_security_live"], "not_verified");
+        assert_eq!(status["watch_directory"], "not_checked");
+    }
+
+    #[test]
+    fn copilot_prompt_replaces_model_facing_secret_without_echo() {
+        let mut output = Vec::new();
+        copilot_prompt_hook(
+            &mut br#"{"transformedPrompt":"password=example-only-credential"}"#.as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("modifiedTransformedPrompt"));
+        assert!(!text.contains("example-only-credential"));
+    }
+
+    #[test]
+    fn copilot_tool_denies_keychain_command_in_string_args() {
+        let mut output = Vec::new();
+        copilot_tool_hook(&mut br#"{"toolName":"bash","toolArgs":"{\"command\":\"security find-generic-password\"}"}"#.as_slice(), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("\"permissionDecision\":\"deny\""));
     }
 }

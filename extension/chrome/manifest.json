@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Runeward Guard (experimental)",
   "version": "0.1.0",
-  "description": "Observe image attachment attempts on supported AI websites.",
-  "permissions": ["nativeMessaging"],
+  "description": "Observe image selection, paste, and narrow matching HTTP upload signals on supported AI websites.",
+  "permissions": ["nativeMessaging", "webRequest"],
   "host_permissions": ["https://chatgpt.com/*", "https://claude.ai/*"],
   "background": {"service_worker": "background.js"},
   "content_scripts": [

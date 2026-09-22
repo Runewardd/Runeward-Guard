@@ -1,0 +1,4 @@
+{"kind":"exec","time":"2026-09-22T00:00:00Z","process":{"pid":100,"pid_version":1},"parent":null,"executable":"/usr/local/bin/codex","signing_id":""}
+{"kind":"fork","time":"2026-09-22T00:00:01Z","process":{"pid":101,"pid_version":1},"parent":{"pid":100,"pid_version":1},"executable":"/bin/sh"}
+{"kind":"open","time":"2026-09-22T00:00:02Z","process":{"pid":101,"pid_version":1},"executable":"/bin/sh","path":"/Users/demo/Library/Keychains/login.keychain-db"}
+{"kind":"open","time":"2026-09-22T00:00:03Z","process":{"pid":200,"pid_version":1},"executable":"/usr/libexec/securityd","path":"/Users/demo/Library/Keychains/login.keychain-db"}

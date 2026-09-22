@@ -4,6 +4,15 @@ The unprivileged Guard monitor can observe files in a chosen folder and an opt-i
 
 Apple's [Endpoint Security API](https://developer.apple.com/documentation/endpointsecurity) is the supported path for system-wide process and file event monitoring. A client must carry the restricted [`com.apple.developer.endpoint-security.client` entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.developer.endpoint-security.client), which Apple says must be requested. A distributed Guard sensor would also need an app/system-extension package, code signing, provisioning, user or MDM approval, and the relevant privacy permission. An ordinary unsigned Rust binary cannot opt itself into that entitlement.
 
-For Runeward Guard, the next implementation milestone is a signed system extension that collects **metadata only**: agent process identity and ancestry, selected process-exec activity, and direct Keychain-related file events. It must not read Keychain item values. The extension's events will be correlated with harness and browser signals before claiming that a particular agent handled a secret. A Keychain database open by `securityd` alone does not identify the client that asked for an item, and a Keychain-access signal alone does not prove disclosure to an AI provider.
+Guard now has a Rust `guard-sensor` collector for **metadata only**: process exec/fork/exit and file-open notifications. Its platform-neutral correlation engine can be exercised without an entitlement:
 
-You do not need the entitlement to build or try the current unprivileged monitor. To ship the system-wide sensor, the maintainer will need an Apple Developer Program team and an approved Endpoint Security entitlement. Guard should not ask users to disable System Integrity Protection to work around a missing entitlement.
+```sh
+cargo build --locked --bin guard-sensor
+./target/debug/guard-sensor replay < examples/sensor-events.ndjson
+```
+
+`guard-sensor live` subscribes to Apple's Endpoint Security notification events on macOS. It requires a root-owned, signed and entitled installation with Full Disk Access; a plain local Cargo build cannot activate it. The current repository does **not** include a signed system-extension host app or an installer. Provisioning, activation, update, recovery, and uninstallation remain separate release work. Do not disable System Integrity Protection as a workaround.
+
+The sensor never reads Keychain item values. It emits a low-confidence finding only when a process named like Codex, Claude, or Copilot (or a tracked descendant) **directly opens** a Keychain file. Names are spoofable and process starts before the sensor may be unknown. A Keychain database open by `securityd` is deliberately not attributed to a client: it does not identify which app requested an item. None of these events proves disclosure to an AI provider. Findings omit file paths, command arguments, and environment variables. If the sensor's bounded queue overflows, it reports dropped observations on stderr rather than implying full coverage.
+
+You do not need the entitlement to build or try the current unprivileged monitor or the sensor replay. To run and ship the live sensor, the maintainer will need an Apple Developer Program team and an approved Endpoint Security entitlement. Packaging and signing must use that team's identity and a system-extension host app.
