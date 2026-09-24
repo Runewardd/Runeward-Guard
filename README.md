@@ -30,6 +30,8 @@ For live screenshot-to-browser correlation, see [macOS monitoring setup](docs/ma
 
 For read-only setup checks and bounded retrospective summaries of Guard's own logs, see [local operations](docs/operations.md).
 
+For the first testable device identity and metadata-only health envelope, see [device management foundation](docs/device-management.md). It intentionally stops before remote enrollment: the local identity is not a fleet credential.
+
 For the experimental macOS Endpoint Security sensor and an entitlement-free replay, see [the sensor notes](docs/endpoint-security.md). The live sensor is not usable as an unsigned Cargo binary and does not identify Keychain item retrieval through `securityd`.
 
 ## Event contract
