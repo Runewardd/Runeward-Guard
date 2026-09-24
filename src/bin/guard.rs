@@ -3,7 +3,7 @@ use regex::Regex;
 use runeward_guard::MAX_EVENT_BYTES;
 use runeward_guard::audit;
 use runeward_guard::detector::{Detector, Event};
-use runeward_guard::{host, observer, parse_exact, service, wire};
+use runeward_guard::{device, host, observer, parse_exact, service, wire};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -340,12 +340,7 @@ fn setup_command(args: &[String], output: &mut impl Write) -> Result<(), String>
     .map_err(|error| error.to_string())
 }
 
-fn doctor(args: &[String], output: &mut impl Write) -> Result<(), String> {
-    let directory = match args {
-        [] => None,
-        [flag, path] if flag == "--dir" => Some(Path::new(path)),
-        _ => return Err("usage: guard doctor [--dir ABSOLUTE_SCREENSHOT_DIRECTORY]".into()),
-    };
+fn local_health(directory: Option<&Path>) -> serde_json::Value {
     let watch_directory = match directory {
         None => "not_checked",
         Some(path) if path.is_absolute() && path.is_dir() && fs::read_dir(path).is_ok() => {
@@ -386,17 +381,72 @@ fn doctor(args: &[String], output: &mut impl Write) -> Result<(), String> {
         },
         None => "unavailable",
     };
-    serde_json::to_writer(
-        &mut *output,
-        &serde_json::json!({
-            "macos_supported": cfg!(target_os = "macos"),
-            "watch_directory": watch_directory,
-            "browser_host_config": browser_host_config,
-            "monitor_socket": monitor_socket,
-            "endpoint_security_live": "not_verified"
-        }),
-    )
-    .map_err(|error| error.to_string())?;
+    serde_json::json!({
+        "macos_supported": cfg!(target_os = "macos"),
+        "watch_directory": watch_directory,
+        "browser_host_config": browser_host_config,
+        "monitor_socket": monitor_socket,
+        "endpoint_security_live": "not_verified"
+    })
+}
+
+fn doctor(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let directory = match args {
+        [] => None,
+        [flag, path] if flag == "--dir" => Some(Path::new(path)),
+        _ => return Err("usage: guard doctor [--dir ABSOLUTE_SCREENSHOT_DIRECTORY]".into()),
+    };
+    serde_json::to_writer(&mut *output, &local_health(directory))
+        .map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn device_init(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let mut state_dir = None;
+    let mut display_name = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--state-dir" => {
+                state_dir = Some(PathBuf::from(
+                    rest.next().ok_or("missing --state-dir value")?,
+                ))
+            }
+            "--name" => display_name = Some(rest.next().ok_or("missing --name value")?.as_str()),
+            _ => return Err(format!("unexpected device-init argument: {arg}")),
+        }
+    }
+    let identity = device::initialize(
+        &state_dir.ok_or("device-init requires --state-dir")?,
+        display_name,
+    )?;
+    serde_json::to_writer(&mut *output, &identity).map_err(|error| error.to_string())?;
+    writeln!(output).map_err(|error| error.to_string())
+}
+
+fn device_status(args: &[String], output: &mut impl Write) -> Result<(), String> {
+    let mut state_dir = None;
+    let mut watch = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--state-dir" => {
+                state_dir = Some(PathBuf::from(
+                    rest.next().ok_or("missing --state-dir value")?,
+                ))
+            }
+            "--dir" => watch = Some(PathBuf::from(rest.next().ok_or("missing --dir value")?)),
+            _ => return Err(format!("unexpected device-status argument: {arg}")),
+        }
+    }
+    let identity = device::load(&state_dir.ok_or("device-status requires --state-dir")?)?;
+    let status = serde_json::json!({
+        "device": identity,
+        "agent_version": env!("CARGO_PKG_VERSION"),
+        "checked_at": Utc::now(),
+        "health": local_health(watch.as_deref())
+    });
+    serde_json::to_writer(&mut *output, &status).map_err(|error| error.to_string())?;
     writeln!(output).map_err(|error| error.to_string())
 }
 
@@ -643,7 +693,7 @@ fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(command) = args.first() else {
         return Err(
-            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|copilot-prompt-hook|copilot-tool-hook|doctor|audit-summary|monitor|setup-chrome|setup-launch-agent>".into(),
+            "usage: guard <inspect|check|claude-hook|claude-tool-hook|codex-prompt-hook|codex-tool-hook|copilot-prompt-hook|copilot-tool-hook|device-init|device-status|doctor|audit-summary|monitor|setup-chrome|setup-launch-agent>".into(),
         );
     };
     let mut stdout = io::stdout().lock();
@@ -670,6 +720,8 @@ fn run() -> Result<i32, String> {
         "copilot-tool-hook" if args.len() == 1 => {
             copilot_tool_hook(&mut io::stdin().lock(), &mut stdout).map(|_| 0)
         }
+        "device-init" => device_init(&args[1..], &mut stdout).map(|_| 0),
+        "device-status" => device_status(&args[1..], &mut stdout).map(|_| 0),
         "doctor" => doctor(&args[1..], &mut stdout).map(|_| 0),
         "audit-summary" => audit_summary(&args[1..], &mut stdout).map(|_| 0),
         "monitor" => monitor_command(&args[1..], &mut stdout).map(|_| 0),

@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod detector;
+pub mod device;
 pub mod host;
 pub mod observer;
 pub mod sensor;
